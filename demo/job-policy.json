@@ -1,10 +1,12 @@
 {
-  "policy_version": "demo-1",
+  "policy_version": "demo-2",
   "auto_approve_usd": 0.0001,
-  "hard_cap_usd": 5.0,
+  "hard_cap_usd": 500.0,
   "allowlist": [
     { "provider": "mock", "model": "mock-small" },
-    { "provider": "openai", "model": "gpt-4o-mini" }
+    { "provider": "openai", "model": "gpt-4o-mini" },
+    { "provider": "gemini", "model": "gemini-2.5-pro" },
+    { "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
   "max_concurrency": 2,
   "approval_timeout_seconds": 600,

@@ -1,0 +1,10 @@
+{
+  "benchmark": "overnight-reasoning-suite-v2",
+  "description": "THE overnight benchmark job: 190 long-form reasoning cases with a 65,536-token output ceiling each. On gemini/gemini-2.5-pro the worst-case reservation lands around $137 — well above any sane auto-approve threshold, so the run pauses and the phone gets the decision. Use this when the user asks for 'the overnight job/run/benchmark'.",
+  "defaults": { "provider": "gemini", "model": "gemini-2.5-pro" },
+  "generate": {
+    "count": 190,
+    "prompt_template": "Reasoning case {i} of the overnight suite: analyze the multi-step planning problem labeled #{i}, produce a full chain-of-thought solution, verify it against at least two alternative approaches, and end with a structured verdict including confidence and failure modes.",
+    "max_output_tokens": 65536
+  }
+}

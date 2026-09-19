@@ -71,31 +71,59 @@ export async function callProvider(req: CaseRequest, retry: RetryPolicy): Promis
   throw new ProviderUnavailableError(retry.max_attempts, lastStatus);
 }
 
+/** Per-provider credentials and endpoints — all resolved inside the gateway. */
+function providerConfig(provider: string): { key?: string; base: string; envHint: string } {
+  if (provider === "gemini") {
+    return {
+      key: process.env.GEMINI_API_KEY,
+      base: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta/openai",
+      envHint: "GEMINI_API_KEY",
+    };
+  }
+  return {
+    key: process.env.PROVIDER_API_KEY,
+    base: process.env.PROVIDER_BASE_URL ?? "https://api.openai.com/v1",
+    envHint: "PROVIDER_API_KEY",
+  };
+}
+
+/**
+ * Providers listed in FAKE_PROVIDERS (comma-separated) are simulated with the
+ * deterministic mock backend: full budget/approval/ledger flow, zero spend.
+ * Lets the demo film "approve $137 for Gemini" without a Gemini bill.
+ */
+function isSimulated(provider: string): boolean {
+  if (provider === "mock") return true;
+  return (process.env.FAKE_PROVIDERS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .includes(provider);
+}
+
 async function attemptOnce(req: CaseRequest): Promise<ProviderResult | { ok: false; status: number; message: string }> {
   // Deterministic failure injection for the demo/tests ("cold-start 503").
   if (req.simulate_503 || process.env.SIMULATE_PROVIDER_503 === "true") {
     return { ok: false, status: 503, message: "simulated cold-start: model instance is scaling from zero" };
   }
 
-  if (req.provider === "mock") {
-    // Keyless deterministic mock so anyone can clone the repo and run the demo.
+  if (isSimulated(req.provider)) {
+    // Keyless deterministic simulation so anyone can clone the repo and run the demo.
     const outputTokens = Math.min(64, req.max_output_tokens);
     return {
       ok: true,
-      output: `[mock ${req.model}] answer for: ${req.prompt.slice(0, 80)}`,
+      output: `[simulated ${req.provider}/${req.model}] answer for: ${req.prompt.slice(0, 80)}`,
       input_tokens: Math.ceil(req.prompt.length / 3.5),
       output_tokens: outputTokens,
     };
   }
 
-  const apiKey = process.env.PROVIDER_API_KEY;
-  const baseUrl = process.env.PROVIDER_BASE_URL ?? "https://api.openai.com/v1";
+  const { key: apiKey, base: baseUrl, envHint } = providerConfig(req.provider);
   if (!apiKey) {
     return {
       ok: false,
       status: 401,
-      message:
-        "Gateway has no PROVIDER_API_KEY configured. Set it in the gateway's environment (never in the agent).",
+      message: `Gateway has no ${envHint} configured for provider '${req.provider}'. Set it in the gateway's environment (never in the agent), or add the provider to FAKE_PROVIDERS to simulate it.`,
     };
   }
 

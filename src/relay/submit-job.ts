@@ -1,17 +1,20 @@
 /**
  * CLI: submit the demo evaluation job to the relay.
  *
- *   npm run job                       # mock provider (keyless, safe)
- *   npm run job -- openai gpt-4o-mini # real provider (gateway holds the key)
+ *   npm run job                                                      # mock provider (keyless, safe)
+ *   npm run job -- openai gpt-4o-mini                                # real provider (gateway holds the key)
+ *   npm run job -- gemini gemini-2.5-pro demo/overnight-manifest.json # the "$137 overnight" demo
  */
 import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const RELAY_URL = process.env.RELAY_URL ?? `http://localhost:${process.env.RELAY_PORT ?? 8789}`;
-const [provider = "mock", model = "mock-small"] = process.argv.slice(2);
+const [provider = "mock", model = "mock-small", manifestArg] = process.argv.slice(2);
 
-const manifestPath = process.env.MANIFEST_PATH ?? resolve(process.cwd(), "demo/benchmark-manifest.json");
+const manifestPath = manifestArg
+  ? resolve(process.cwd(), manifestArg)
+  : (process.env.MANIFEST_PATH ?? resolve(process.cwd(), "demo/benchmark-manifest.json"));
 const manifest = readFileSync(manifestPath, "utf8");
 const jobId = process.env.JOB_ID ?? "demo-eval";
 

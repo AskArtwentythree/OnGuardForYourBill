@@ -1,6 +1,7 @@
 {
   "benchmark": "mini-reasoning-eval-v1",
-  "description": "A tiny 8-case reasoning benchmark used for the OnGuardForYourBill demo. Case 'case-007' can simulate a provider 503 when SIMULATE_503_CASE=true is exported before starting the gateway (or edit simulate_503 below).",
+  "description": "A tiny 8-case reasoning benchmark — the small/quick demo. Case 'case-007' can simulate a provider 503 by setting simulate_503 to true below. Use this when the user asks for 'the small demo' or 'the quick eval'.",
+  "defaults": { "provider": "mock", "model": "mock-small" },
   "cases": [
     {
       "id": "case-001",

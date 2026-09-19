@@ -8,6 +8,8 @@
  *   atomically reserve worst-case cost against an approved, signed grant.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { Ledger, LedgerError } from "./ledger.js";
 import {
@@ -29,10 +31,39 @@ const CaseSchema = z.object({
   simulate_503: z.boolean().optional().describe("Demo/test hook: this case returns 503 from the provider"),
 });
 
+const GenerateSchema = z.object({
+  count: z.number().int().positive().max(10000).describe("Number of cases to generate"),
+  prompt_template: z.string().describe("Case prompt template; '{i}' is replaced with the case number"),
+  max_output_tokens: z.number().int().positive().describe("Output-token ceiling applied to every generated case"),
+});
+
 const ManifestSchema = z.object({
   benchmark: z.string().describe("Benchmark name"),
-  cases: z.array(CaseSchema).min(1),
+  description: z.string().optional(),
+  defaults: z
+    .object({ provider: z.string(), model: z.string() })
+    .optional()
+    .describe("Provider/model this benchmark is intended for (still subject to the allowlist)"),
+  cases: z.array(CaseSchema).min(1).optional().describe("Explicit case list"),
+  generate: GenerateSchema.optional().describe("Alternative to 'cases': generate N templated cases (for large overnight runs)"),
 });
+
+type Manifest = z.infer<typeof ManifestSchema>;
+type Case = z.infer<typeof CaseSchema>;
+
+/** Expand a manifest into concrete cases (explicit list or generator spec). */
+function expandManifest(manifest: Manifest): Case[] {
+  if (manifest.cases?.length) return manifest.cases;
+  if (manifest.generate) {
+    const g = manifest.generate;
+    return Array.from({ length: g.count }, (_, idx) => ({
+      id: `case-${String(idx + 1).padStart(4, "0")}`,
+      prompt: g.prompt_template.replaceAll("{i}", String(idx + 1)),
+      max_output_tokens: g.max_output_tokens,
+    }));
+  }
+  throw new Error("Manifest must contain either 'cases' or 'generate'.");
+}
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -45,9 +76,66 @@ function toolError(code: string, message: string) {
   };
 }
 
+/** Benchmark library: manifest JSON files served read-only from BENCHMARKS_DIR. */
+function loadBenchmarks(): Manifest[] {
+  const dir = process.env.BENCHMARKS_DIR ?? resolve(process.cwd(), "demo");
+  const manifests: Manifest[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith("-manifest.json")) continue;
+    try {
+      manifests.push(JSON.parse(readFileSync(resolve(dir, file), "utf8")) as Manifest);
+    } catch {
+      /* skip malformed files */
+    }
+  }
+  return manifests;
+}
+
 export function buildMcpServer(ledger: Ledger): McpServer {
   const server = new McpServer({ name: "onguard-for-your-bill", version: "1.0.0" });
   const policy = loadPolicy();
+
+  server.registerTool(
+    "list_benchmarks",
+    {
+      title: "List available benchmarks",
+      description:
+        "The registered benchmark library. When the user names a job loosely ('the overnight job', 'the small demo'), find it here instead of asking for a manifest. Returns each benchmark's name, description, intended provider/model, and case count.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () =>
+      json(
+        loadBenchmarks().map((m) => ({
+          benchmark: m.benchmark,
+          description: m.description,
+          defaults: m.defaults,
+          cases: m.cases?.length ?? m.generate?.count ?? 0,
+          max_output_tokens: m.generate?.max_output_tokens ?? Math.max(...(m.cases ?? []).map((c) => c.max_output_tokens), 0),
+        })),
+      ),
+  );
+
+  server.registerTool(
+    "get_benchmark",
+    {
+      title: "Get a benchmark manifest",
+      description:
+        "Fetch the full manifest of a registered benchmark by name. Pass the result unchanged to estimate_run and execute_all.",
+      inputSchema: { benchmark: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ benchmark }) => {
+      const m = loadBenchmarks().find((b) => b.benchmark === benchmark);
+      if (!m) {
+        return toolError(
+          "UNKNOWN_BENCHMARK",
+          `No benchmark named '${benchmark}'. Call list_benchmarks for the available names.`,
+        );
+      }
+      return json(m);
+    },
+  );
 
   server.registerTool(
     "get_job_policy",
@@ -85,9 +173,10 @@ export function buildMcpServer(ledger: Ledger): McpServer {
       const price = findPrice(provider, model);
       if (!price) return toolError("UNKNOWN_MODEL", `No price catalog entry for ${provider}/${model}.`);
 
+      const cases = expandManifest(manifest);
       let worst = 0;
       let expected = 0;
-      const perCase = manifest.cases.map((c) => {
+      const perCase = cases.map((c) => {
         const inputTokens = estimateInputTokens(c.prompt);
         const w = worstCaseUsdForCase(price, inputTokens, c.max_output_tokens);
         const e = worstCaseUsdForCase(price, inputTokens, Math.ceil(c.max_output_tokens * 0.4));
@@ -101,7 +190,7 @@ export function buildMcpServer(ledger: Ledger): McpServer {
         job_id,
         provider,
         model,
-        cases: manifest.cases.length,
+        cases: cases.length,
         expected_usd: round6(expected),
         worst_case_usd: round6(worst),
         auto_approve_threshold_usd: policy.auto_approve_usd,
@@ -114,7 +203,9 @@ export function buildMcpServer(ledger: Ledger): McpServer {
           safety_margin: policy.estimate_safety_margin,
           expected_assumes_output_fraction: 0.4,
         },
-        per_case: perCase,
+        per_case: perCase.length > 8 ? perCase.slice(0, 8) : perCase,
+        per_case_note:
+          perCase.length > 8 ? `showing 8 of ${perCase.length} cases; all are included in the totals` : undefined,
       });
     },
   );
@@ -179,12 +270,77 @@ export function buildMcpServer(ledger: Ledger): McpServer {
     },
   );
 
+  /** Shared per-case execution: atomic reserve -> provider call -> settle. */
+  type CaseOutcome =
+    | { kind: "completed"; case_id: string; charged_usd: number | null; output: string }
+    | { kind: "duplicate"; case_id: string; charged_usd: number | null; output: string | null }
+    | { kind: "error"; case_id: string; code: string; message: string };
+
+  async function executeOne(
+    grantId: string,
+    provider: string,
+    model: string,
+    c: z.infer<typeof CaseSchema>,
+    requestId: string,
+  ): Promise<CaseOutcome> {
+    let reserved = false;
+    try {
+      ledger.checkGrant(grantId, provider, model);
+      const price = findPrice(provider, model)!;
+      const inputTokens = estimateInputTokens(c.prompt);
+      const worst = round6(worstCaseUsdForCase(price, inputTokens, c.max_output_tokens));
+
+      const { event, duplicate } = ledger.reserve(grantId, requestId, c.id, worst);
+      if (duplicate && event.status !== "reserved") {
+        return { kind: "duplicate", case_id: c.id, charged_usd: event.actual_usd, output: event.output };
+      }
+      reserved = true;
+
+      const result = await callProvider(
+        { provider, model, prompt: c.prompt, max_output_tokens: c.max_output_tokens, simulate_503: c.simulate_503 },
+        policy.retry,
+      );
+
+      const usageKnown = result.input_tokens >= 0 && result.output_tokens >= 0;
+      const actual = usageKnown
+        ? round6(worstCaseUsdForCase(price, result.input_tokens, result.output_tokens))
+        : undefined; // undefined => ledger charges the full reservation (fail closed)
+
+      const settled = ledger.settle(grantId, requestId, {
+        status: "settled",
+        actual_usd: actual,
+        input_tokens: usageKnown ? result.input_tokens : undefined,
+        output_tokens: usageKnown ? result.output_tokens : undefined,
+        output: result.output,
+      });
+      return { kind: "completed", case_id: c.id, charged_usd: settled.actual_usd, output: result.output };
+    } catch (err) {
+      if (reserved) {
+        try {
+          ledger.settle(grantId, requestId, { status: "failed" }); // release; failed calls charge $0
+        } catch {
+          /* already settled */
+        }
+      }
+      if (err instanceof ProviderUnavailableError) {
+        return {
+          kind: "error",
+          case_id: c.id,
+          code: "PROVIDER_UNAVAILABLE",
+          message: `${err.message} Retry budget: ${policy.retry.max_attempts} attempts with bounded exponential backoff (policy-enforced). The gateway will NOT switch providers, models, projects, or keys.`,
+        };
+      }
+      if (err instanceof LedgerError) return { kind: "error", case_id: c.id, code: err.code, message: err.message };
+      return { kind: "error", case_id: c.id, code: "EXECUTION_FAILED", message: (err as Error).message };
+    }
+  }
+
   server.registerTool(
     "execute_case",
     {
       title: "Execute one benchmark case",
       description:
-        "Run ONE benchmark case through the budget-enforcing proxy. Requires a valid grant_id from an approved reserve_budget. The gateway atomically reserves the case's worst-case cost before calling the provider, settles actual usage after, and rejects the call when the remaining grant is insufficient. Use the case id as request_id — retries with the same request_id are idempotent and never double-charge.",
+        "Run ONE benchmark case through the budget-enforcing proxy. Requires a valid grant_id from an approved reserve_budget. The gateway atomically reserves the case's worst-case cost before calling the provider, settles actual usage after, and rejects the call when the remaining grant is insufficient. Use the case id as request_id — retries with the same request_id are idempotent and never double-charge. For manifests with many cases, prefer execute_all.",
       inputSchema: {
         grant_id: z.string(),
         request_id: z.string().describe("Idempotency key; use the case id"),
@@ -195,79 +351,86 @@ export function buildMcpServer(ledger: Ledger): McpServer {
       annotations: { readOnlyHint: false },
     },
     async ({ grant_id, request_id, case: c, provider, model }) => {
-      let reservedUsd = 0;
+      const outcome = await executeOne(grant_id, provider, model, c, request_id);
+      if (outcome.kind === "error") return toolError(outcome.code, outcome.message);
+      const after = ledger.getGrant(grant_id)!;
+      return json({
+        request_id,
+        case_id: c.id,
+        status: outcome.kind === "duplicate" ? "duplicate (idempotent replay, no new charge)" : "completed",
+        output: outcome.output,
+        charged_usd: outcome.charged_usd,
+        grant_remaining_usd: round6(after.max_usd - after.used_usd - after.reserved_usd),
+        calls_used: `${after.calls}/${after.max_calls}`,
+      });
+    },
+  );
+
+  server.registerTool(
+    "execute_all",
+    {
+      title: "Execute the whole benchmark under the grant",
+      description:
+        "Run EVERY case of the manifest through the budget-enforcing proxy under an approved grant, honoring the grant's max_concurrency. Each case still gets its own atomic worst-case reservation and settlement — the run stops early the moment the grant cap, call limit, or provider retry budget is hit, and reports exactly where it stopped. Idempotent per case; safe to call again after an interruption to finish the remainder. Use this for overnight-scale manifests instead of hundreds of execute_case calls.",
+      inputSchema: {
+        grant_id: z.string(),
+        provider: z.string(),
+        model: z.string(),
+        manifest: ManifestSchema,
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ grant_id, provider, model, manifest }) => {
+      let grant;
       try {
-        const grant = ledger.checkGrant(grant_id, provider, model);
-        const price = findPrice(provider, model)!;
-        const inputTokens = estimateInputTokens(c.prompt);
-        const worst = round6(worstCaseUsdForCase(price, inputTokens, c.max_output_tokens));
-
-        const { event, duplicate } = ledger.reserve(grant_id, request_id, c.id, worst);
-        if (duplicate && event.status !== "reserved") {
-          return json({
-            request_id,
-            case_id: c.id,
-            duplicate: true,
-            status: event.status,
-            charged_usd: event.actual_usd,
-            output: event.output,
-            note: "Idempotent replay: this request was already settled; no new charge.",
-          });
-        }
-        reservedUsd = event.reserved_usd;
-
-        const result = await callProvider(
-          {
-            provider,
-            model,
-            prompt: c.prompt,
-            max_output_tokens: c.max_output_tokens,
-            simulate_503: c.simulate_503,
-          },
-          policy.retry,
-        );
-
-        const usageKnown = result.input_tokens >= 0 && result.output_tokens >= 0;
-        const actual = usageKnown
-          ? round6(worstCaseUsdForCase(price, result.input_tokens, result.output_tokens))
-          : undefined; // undefined => ledger charges the full reservation (fail closed)
-
-        const settled = ledger.settle(grant_id, request_id, {
-          status: "settled",
-          actual_usd: actual,
-          input_tokens: usageKnown ? result.input_tokens : undefined,
-          output_tokens: usageKnown ? result.output_tokens : undefined,
-          output: result.output,
-        });
-        const after = ledger.getGrant(grant_id)!;
-        return json({
-          request_id,
-          case_id: c.id,
-          status: "completed",
-          output: result.output,
-          charged_usd: settled.actual_usd,
-          reserved_worst_case_usd: worst,
-          grant_remaining_usd: round6(after.max_usd - after.used_usd - after.reserved_usd),
-          calls_used: `${after.calls}/${after.max_calls}`,
-        });
+        grant = ledger.checkGrant(grant_id, provider, model);
       } catch (err) {
-        if (reservedUsd > 0) {
-          // Release the reservation; failed calls charge $0.
-          try {
-            ledger.settle(grant_id, request_id, { status: "failed" });
-          } catch {
-            /* already settled */
+        if (err instanceof LedgerError) return toolError(err.code, err.message);
+        throw err;
+      }
+      const cases = expandManifest(manifest);
+      const concurrency = Math.max(1, Math.min(grant.max_concurrency, policy.max_concurrency));
+
+      const outcomes: CaseOutcome[] = [];
+      let stopReason: { code: string; message: string; at_case: string } | undefined;
+      let cursor = 0;
+
+      const worker = async () => {
+        while (!stopReason) {
+          const idx = cursor++;
+          if (idx >= cases.length) return;
+          const c = cases[idx];
+          const outcome = await executeOne(grant_id, provider, model, c, c.id);
+          outcomes.push(outcome);
+          if (
+            outcome.kind === "error" &&
+            ["PROVIDER_UNAVAILABLE", "CAP_REACHED", "MAX_CALLS_REACHED", "GRANT_EXPIRED", "GRANT_REVOKED"].includes(
+              outcome.code,
+            )
+          ) {
+            stopReason ??= { code: outcome.code, message: outcome.message, at_case: c.id };
           }
         }
-        if (err instanceof ProviderUnavailableError) {
-          return toolError(
-            "PROVIDER_UNAVAILABLE",
-            `${err.message} Retry budget: ${policy.retry.max_attempts} attempts with bounded exponential backoff (policy-enforced). The gateway will NOT switch providers, models, projects, or keys.`,
-          );
-        }
-        if (err instanceof LedgerError) return toolError(err.code, err.message);
-        return toolError("EXECUTION_FAILED", (err as Error).message);
-      }
+      };
+      await Promise.all(Array.from({ length: concurrency }, worker));
+
+      const completed = outcomes.filter((o) => o.kind !== "error");
+      const failed = outcomes.filter((o) => o.kind === "error");
+      const after = ledger.getGrant(grant_id)!;
+      return json({
+        status: stopReason ? "stopped_early" : "completed",
+        stop_reason: stopReason,
+        cases_planned: cases.length,
+        cases_completed: completed.length,
+        cases_failed: failed.length,
+        spent_usd: round6(after.used_usd),
+        grant_max_usd: after.max_usd,
+        grant_remaining_usd: round6(after.max_usd - after.used_usd - after.reserved_usd),
+        calls_used: `${after.calls}/${after.max_calls}`,
+        concurrency_used: concurrency,
+        sample_outputs: completed.slice(0, 3).map((o) => ({ case_id: o.case_id, output: (o.output ?? "").slice(0, 160) })),
+        failed_cases: failed.slice(0, 5).map((o) => ({ case_id: o.case_id, code: o.code })),
+      });
     },
   );
 
@@ -293,12 +456,13 @@ export function buildMcpServer(ledger: Ledger): McpServer {
       annotations: { readOnlyHint: true },
     },
     async ({ job_id, manifest }) => {
+      const cases = expandManifest(manifest);
       const options = policy.allowlist
         .map((a) => {
           const price = findPrice(a.provider, a.model);
           if (!price) return undefined;
           let worst = 0;
-          for (const c of manifest.cases) {
+          for (const c of cases) {
             worst += worstCaseUsdForCase(price, estimateInputTokens(c.prompt), c.max_output_tokens);
           }
           worst *= policy.estimate_safety_margin;
