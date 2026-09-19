@@ -51,6 +51,7 @@ export function statusPageHtml(): string {
 </div>
 <script>
 let manualAway = true, token = "";
+const fmtUsd = n => '$' + (n >= 0.01 ? n.toFixed(2) : n.toPrecision(3));
 async function refresh() {
   const r = await fetch('/api/state'); const s = await r.json();
   manualAway = s.manualAway; token = s.webhookToken;
@@ -60,12 +61,12 @@ async function refresh() {
   const apr = s.approvals || [];
   document.getElementById('approvals').innerHTML = apr.length ? apr.map(a => \`
     <div class="approval">
-      <div class="big">\${a.requestedUsd != null ? '$' + a.requestedUsd.toFixed(2) : a.toolName}</div>
+      <div class="big">\${a.requestedUsd != null ? fmtUsd(a.requestedUsd) : a.toolName}</div>
       <div class="mono">\${a.toolName} · \${(a.args.provider||'')}/\${(a.args.model||'')} · \${a.args.max_calls||'?'} calls · expires \${new Date(a.expiresAt).toLocaleTimeString()}</div>
       <div style="margin-top:8px">
         <span class="pill \${a.status}">\${a.status.toUpperCase()}</span> <span class="mono">routed to \${a.routedTo}</span>
         \${a.status === 'pending' ? \`
-          <button class="approve" onclick="decide('\${a.approvalId}','approve')">Approve exactly \${a.requestedUsd != null ? '$' + a.requestedUsd.toFixed(2) : ''}</button>
+          <button class="approve" onclick="decide('\${a.approvalId}','approve')">Approve exactly \${a.requestedUsd != null ? fmtUsd(a.requestedUsd) : ''}</button>
           <button class="deny" onclick="decide('\${a.approvalId}','deny')">Deny</button>\` : (a.decidedBy ? '<span class="mono"> · by ' + a.decidedBy + '</span>' : '')}
       </div>
     </div>\`).join('') : 'none';
@@ -85,7 +86,7 @@ async function refresh() {
       <div class="row"><span>Remaining</span><b>$\${t.remaining_usd.toFixed(4)}</b></div>
       <div class="row"><span>Calls / failures</span><b>\${t.calls} / \${t.failures}</b></div>
       <div class="row"><span>Control-plane (harness tokens)</span><b>$\${cp.spent_usd.toFixed(4)} / $\${cp.cap_usd.toFixed(2)}</b></div>
-      \${u.grants.map(g => \`<div class="row mono"><span>\${g.provider}/\${g.model} \${g.status}</span><span>$\${g.used_usd.toFixed(4)} of $\${g.max_usd.toFixed(2)} · \${g.calls}/\${g.max_calls} calls</span></div>\`).join('')}\`;
+      \${u.grants.map(g => \`<div class="row mono"><span>\${g.provider}/\${g.model} \${g.status}</span><span>\${fmtUsd(g.used_usd)} of \${fmtUsd(g.max_usd)} · \${g.calls}/\${g.max_calls} calls</span></div>\`).join('')}\`;
     const pol = s.gateway.policy;
     document.getElementById('policy').innerHTML =
       'auto-approve ≤ $' + pol.auto_approve_usd + ' · hard cap $' + pol.hard_cap_usd +

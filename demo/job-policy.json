@@ -1,6 +1,6 @@
 {
   "policy_version": "demo-1",
-  "auto_approve_usd": 0.001,
+  "auto_approve_usd": 0.0001,
   "hard_cap_usd": 5.0,
   "allowlist": [
     { "provider": "mock", "model": "mock-small" },

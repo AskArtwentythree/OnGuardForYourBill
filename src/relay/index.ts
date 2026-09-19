@@ -105,6 +105,11 @@ async function refreshPolicy() {
   }
 }
 
+/** "$4.54" for normal amounts, "$0.000776" for sub-cent demo amounts. */
+function fmtUsd(n: number): string {
+  return `$${n >= 0.01 ? n.toFixed(2) : n.toPrecision(3)}`;
+}
+
 function log(job: JobRecord | undefined, line: string) {
   console.log(`[relay] ${line}`);
   job?.log.push({ at: new Date().toISOString(), line });
@@ -232,15 +237,15 @@ async function routeApproval(sessionId: string, ref: PendingRef, job: JobRecord)
 
   // 1) Hard cap: reject outright. No approval button exists for this.
   if (requestedUsd != null && requestedUsd > policyCache.hard_cap_usd) {
-    log(job, `DENIED without prompt: $${requestedUsd.toFixed(2)} exceeds hard cap $${policyCache.hard_cap_usd.toFixed(2)}`);
+    log(job, `DENIED without prompt: ${fmtUsd(requestedUsd)} exceeds hard cap ${fmtUsd(policyCache.hard_cap_usd)}`);
     await sendInfoPush(
       "OnGuard: blocked over hard cap",
-      `The agent asked for $${requestedUsd.toFixed(2)} but the hard cap is $${policyCache.hard_cap_usd.toFixed(2)}. Denied automatically — only you can raise the policy.`,
+      `The agent asked for ${fmtUsd(requestedUsd)} but the hard cap is ${fmtUsd(policyCache.hard_cap_usd)}. Denied automatically — only you can raise the policy.`,
       ["no_entry"],
     );
     return {
       status: "deny",
-      reason: `Requested $${requestedUsd.toFixed(2)} exceeds the absolute hard cap of $${policyCache.hard_cap_usd.toFixed(2)}. This is not negotiable; propose a cheaper plan within policy.`,
+      reason: `Requested ${fmtUsd(requestedUsd)} exceeds the absolute hard cap of ${fmtUsd(policyCache.hard_cap_usd)}. This is not negotiable; propose a cheaper plan within policy.`,
     };
   }
 
@@ -279,7 +284,7 @@ async function routeApproval(sessionId: string, ref: PendingRef, job: JobRecord)
         approvalId,
         title:
           requestedUsd != null
-            ? `${ref.args.provider ?? "Provider"} requests up to $${requestedUsd.toFixed(2)}`
+            ? `${ref.args.provider ?? "Provider"} requests up to ${fmtUsd(requestedUsd)}`
             : `Approval required: ${ref.toolName}`,
         body: buildPhoneBody(ref, expiresAt),
         approveUrl: `${base}/approve?token=${WEBHOOK_TOKEN}`,
@@ -305,7 +310,7 @@ async function routeApproval(sessionId: string, ref: PendingRef, job: JobRecord)
 function describeScope(ref: PendingRef): string {
   if (ref.toolName === "reserve_budget") {
     const a = ref.args as Record<string, unknown>;
-    return `reserve_budget $${Number(a.max_usd ?? 0).toFixed(2)} for ${a.provider}/${a.model}, ${a.max_calls} calls, concurrency ${a.max_concurrency}`;
+    return `reserve_budget ${fmtUsd(Number(a.max_usd ?? 0))} for ${a.provider}/${a.model}, ${a.max_calls} calls, concurrency ${a.max_concurrency}`;
   }
   return `${ref.toolName}(${JSON.stringify(ref.args).slice(0, 120)})`;
 }
