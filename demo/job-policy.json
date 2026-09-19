@@ -1,0 +1,15 @@
+{
+  "policy_version": "demo-1",
+  "auto_approve_usd": 0.001,
+  "hard_cap_usd": 5.0,
+  "allowlist": [
+    { "provider": "mock", "model": "mock-small" },
+    { "provider": "openai", "model": "gpt-4o-mini" }
+  ],
+  "max_concurrency": 2,
+  "approval_timeout_seconds": 600,
+  "grant_ttl_seconds": 3600,
+  "estimate_safety_margin": 1.1,
+  "retry": { "max_attempts": 3, "base_delay_ms": 400, "max_total_wait_ms": 15000 },
+  "control_plane_cap_usd": 1.0
+}

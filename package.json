@@ -1,0 +1,34 @@
+{
+  "name": "onguard-for-your-bill",
+  "version": "1.0.0",
+  "description": "TrueForge agent that runs an overnight model evaluation, but no paid request can exceed a human-approved, provider-scoped budget grant. Approvals arrive as real push notifications on your phone.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.14"
+  },
+  "scripts": {
+    "gateway": "tsx src/gateway/index.ts",
+    "relay": "tsx src/relay/index.ts",
+    "setup": "tsx src/setup/register.ts",
+    "job": "tsx src/relay/submit-job.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@truefoundry/trueforge-sdk": "^0.2.0",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
