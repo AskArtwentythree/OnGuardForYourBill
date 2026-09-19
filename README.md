@@ -224,3 +224,4 @@ tracked in the same ledger and reported in `get_usage` — no unmetered blind sp
 ## License
 
 MIT. No keys, phone numbers, or personal data live in this repo — configuration is `.env` only.
+# OnGuardForYourBill
