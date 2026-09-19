@@ -117,6 +117,29 @@ Watch the dashboard at http://localhost:8789 (also shows the live ledger), and t
 TrueForge Sessions UI. When the agent reserves budget above the auto-approve threshold, your
 phone buzzes with the exact amount. Tap **Approve** — the same session resumes and executes.
 
+### Or run it from the TrueForge chat UI
+
+The relay also watches chat-UI sessions: every 5 seconds it polls for turns paused on
+`tool.approval_required`, routes them through the same phone flow, and resumes the session over
+the SDK. So you can simply open http://localhost:8790 → **Agents → overnight-eval-operator →
+Try**, and type a prompt like:
+
+> Run a small benchmark evaluation job called ui-demo on provider **mock**, model **mock-small**.
+> Create 6 short reasoning test cases yourself with max_output_tokens 400 each, then follow your
+> standard operating procedure: read the policy, estimate the worst-case cost, audit the plan,
+> reserve the exact budget, execute all cases, and report spend.
+
+When the agent reaches `reserve_budget`, the chat pauses — and a few seconds later your phone
+buzzes with the exact amount. Decide in ONE place (phone/dashboard *or* the chat's own
+Allow/Deny buttons); whichever answers first wins.
+
+Swap `mock/mock-small` for `openai/gpt-4o-mini` to spend real money through the gateway
+(requires `PROVIDER_API_KEY` in the gateway env). To see an instant deny plus an informational
+push with no approval button, ask for more than the hard cap:
+
+> For job over-cap-test, call reserve_budget for provider mock, model mock-small with
+> max_usd 10.00, max_calls 100, max_concurrency 2. I explicitly want a $10 reservation.
+
 > No `PROVIDER_API_KEY` in `.env`? The `mock` provider still exercises the entire pipeline —
 > estimate, approval pause, phone push, grant, ledger, retries — with real ledger math and
 > zero spend. Set the key to run real paid calls via `openai/gpt-4o-mini`.

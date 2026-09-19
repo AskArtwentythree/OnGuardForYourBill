@@ -181,6 +181,7 @@ async function streamTurn(
       } catch {
         /* keep {} */
       }
+      handledToolCalls.add(ref.id); // the runner owns this pause; the UI watcher must skip it
       pending.push({
         threadId: paused.threadId ?? "main",
         toolCallId: ref.id,
@@ -362,6 +363,94 @@ function finalizeDecision(approvalId: string, decision: Decision, decidedBy: str
   return true;
 }
 
+// ---------------- UI session watcher ----------------
+// Sessions started in the TrueForge chat UI pause in the browser. This watcher
+// polls recent sessions for turns that ended on tool.approval_required and
+// routes those approvals through the exact same phone flow, then resumes the
+// session over the SDK. Local mode has a single user, so the relay can see and
+// resume UI sessions.
+
+const handledToolCalls = new Set<string>();
+
+async function watchUiSessions() {
+  try {
+    let inspected = 0;
+    for await (const session of await client.sessions.list()) {
+      if (++inspected > 10) break; // only recent sessions
+      await checkSessionForPause(session.id);
+    }
+  } catch (err) {
+    console.warn("[relay] session watcher:", (err as Error).message);
+  }
+}
+
+async function checkSessionForPause(sessionId: string) {
+  // Find the newest turn; only an unanswered pause on the LAST turn matters.
+  let last: TrueForgeApi.Turn | undefined;
+  for await (const turn of await client.sessions.listTurns(sessionId)) {
+    if (!last || turn.createdAt > last.createdAt) last = turn;
+  }
+  if (!last || last.state.status !== "done") return;
+  const pauses = last.state.requiredActions.filter(
+    (a): a is TrueForgeApi.ToolApprovalRequiredEvent => a.type === "tool.approval_required",
+  );
+  if (pauses.length === 0) return;
+
+  // Read the paused tool call's name/args from the persisted (pre-merged) events.
+  const messages = new Map<string, TrueForgeApi.ModelMessageEvent>();
+  for await (const event of await client.sessions.listTurnEvents(sessionId, last.id)) {
+    if (event.type === "model.message") messages.set(event.id, event);
+  }
+
+  for (const pause of pauses) {
+    for (const refCall of pause.toolCalls) {
+      if (handledToolCalls.has(refCall.id)) continue;
+      handledToolCalls.add(refCall.id);
+
+      const msg = messages.get(refCall.sourceEventId);
+      const call = msg?.toolCalls?.find((tc) => tc.id === refCall.id);
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(call?.function.arguments || "{}");
+      } catch {
+        /* keep {} */
+      }
+      const ref: PendingRef = {
+        threadId: pause.threadId ?? "main",
+        toolCallId: refCall.id,
+        toolName: call?.toolInfo?.name ?? call?.function.name ?? "unknown_tool",
+        args,
+      };
+
+      // Adopt the UI session so it shows up on the dashboard with a log.
+      let job = jobs.get(sessionId);
+      if (!job) {
+        job = {
+          jobId: `ui-${sessionId.slice(-6)}`,
+          sessionId,
+          status: "waiting_for_approval",
+          log: [],
+          startedAt: new Date().toISOString(),
+        };
+        jobs.set(sessionId, job);
+        log(job, `adopted chat-UI session ${sessionId} (paused on ${ref.toolName})`);
+      }
+
+      void (async () => {
+        const decision = await routeApproval(sessionId, ref, job!);
+        await continueSession(sessionId, [
+          {
+            type: "user.tool_approval",
+            threadId: ref.threadId,
+            toolCallId: ref.toolCallId,
+            approval: decision,
+          },
+        ]);
+      })();
+    }
+  }
+}
+
 // ---------------- Jobs ----------------
 
 async function startJob(prompt: string, jobId: string): Promise<JobRecord> {
@@ -458,8 +547,11 @@ app.get("/", (_req, res) => {
   res.type("html").send(statusPageHtml());
 });
 
+setInterval(() => void watchUiSessions(), 5000);
+
 app.listen(RELAY_PORT, "0.0.0.0", () => {
   console.log(`[onguard-relay] listening on ${PUBLIC_RELAY_URL}`);
+  console.log(`  Watching TrueForge chat-UI sessions for approval pauses (every 5s).`);
   console.log(`  Dashboard:        ${PUBLIC_RELAY_URL}/`);
   console.log(`  Phone webhook:    ${PUBLIC_RELAY_URL}/decision/:id/:action`);
   console.log(`  TrueForge:        ${process.env.TRUEFORGE_BASE_URL ?? "http://localhost:8790"} (agent: ${AGENT_NAME})`);
